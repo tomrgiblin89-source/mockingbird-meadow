@@ -551,9 +551,33 @@ html.js .nojs{display:none;}
           s.buffer = b; s.connect(ac.destination); s.start(0);
         } catch (e) {}
       }
-      if (ac.state === 'suspended' && ac.resume) { try { ac.resume(); } catch (e) {} }
+      // iOS reports 'interrupted' after a call, lock or app switch, so resume any state that isn't running.
+      if (ac.state !== 'running' && ac.resume) { try { const p = ac.resume(); if (p && p.catch) p.catch(() => {}); } catch (e) {} }
       return ac;
     }
+    // iPhones mute Web Audio when the Ring/Silent switch is on silent. Marking the page's audio as
+    // media playback (iOS 17+), or keeping a silent looping track playing on older iOS, lifts that mute.
+    const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    let keepAlive = null;
+    function silentWavUrl() {
+      const rate = 8000, n = rate / 2;
+      const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+      const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+      v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+      v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+      str(36, 'data'); v.setUint32(40, n * 2, true);
+      return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    }
+    function mediaChannel() {
+      try { if (navigator.audioSession) { navigator.audioSession.type = 'playback'; return; } } catch (e) {}
+      if (!isIOS) return;
+      try {
+        if (!keepAlive) { keepAlive = new Audio(silentWavUrl()); keepAlive.loop = true; keepAlive.setAttribute('playsinline', ''); }
+        if (keepAlive.paused) { const p = keepAlive.play(); if (p && p.catch) p.catch(() => {}); }
+      } catch (e) {}
+    }
+    function sleep() { try { if (keepAlive && !keepAlive.paused) keepAlive.pause(); } catch (e) {} }
     function env(a, node, t0, dur, vol) {
       const g = a.createGain();
       g.gain.setValueAtTime(0.0001, t0);
@@ -596,8 +620,9 @@ html.js .nojs{display:none;}
     }
     return {
       get on() { return on; },
-      set(v) { on = v; try { localStorage.setItem(SOUND_KEY, v ? 'on' : 'off'); } catch (e) {} if (v) getAC(); },
-      unlock() { if (on) getAC(); },
+      set(v) { on = v; try { localStorage.setItem(SOUND_KEY, v ? 'on' : 'off'); } catch (e) {} if (v) { mediaChannel(); getAC(); } else sleep(); },
+      unlock() { if (on) { mediaChannel(); getAC(); } },
+      sleep,
       oink() {
         tone(270, 0.12, { type: 'sawtooth', vol: 0.07, to: 150, lp: 1400 });
         tone(240, 0.15, { type: 'sawtooth', vol: 0.06, to: 130, lp: 1200, delay: 0.13 });
@@ -1446,8 +1471,8 @@ html.js .nojs{display:none;}
   document.addEventListener('touchend', unlockOnce, { passive: true });
   document.addEventListener('click', unlockOnce);
 
-  document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); });
-  window.addEventListener('pagehide', pause);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { pause(); audio.sleep(); } });
+  window.addEventListener('pagehide', () => { pause(); audio.sleep(); });
 
   /* ---------- resize & theme ---------- */
   function onResize() {
